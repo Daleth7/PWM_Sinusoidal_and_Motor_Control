@@ -23,12 +23,15 @@ void enable_tc(void);
     // Set up points to the appropriate structures
 void configure_ports(void);
 
+void update_counter(void);
+
 Tc* timer_set;
 TcCount8* timer;
 Port* port;
 PortGroup* bankA;
 
 #define TIMER_PIN 13
+#define SIN_MARGIN 10
 
 int main (void)
 {
@@ -38,23 +41,33 @@ int main (void)
     configure_ports();
     enable_tc();
 
-    int8_t count = 1;
-    const int8_t margin = 10;
+    timer->CC[1].reg = SIN_MARGIN + 1;
+
     while(1)
     {
-        timer->CC[1].reg += count;
-        if(timer->CC[1].reg == timer->PER.reg - margin) count = -1;
-        else if(timer->CC[1].reg == margin)             count = 1;
-        /*
-        old = count *
-            (
-                (timer->CC[1].reg <= timer->PER.reg - margin) &&
-                (timer->CC[1].reg >= margin)
-            )
-        up = (timer->CC[1].reg == margin);
-        down = (timer->CC[1].reg == timer->PER.reg - margin);
-        */
+        if(timer->INTFLAG.reg & 0x1){
+            update_counter();
+        }
     }
+}
+
+void update_counter(void){
+    static int8_t count = 1;
+
+    timer->CC[1].reg += count;
+/*
+    if(timer->CC[1].reg >= timer->PER.reg - SIN_MARGIN) count = -1;
+    else if(timer->CC[1].reg <= SIN_MARGIN)             count = 1;
+/*/
+    count =
+        count * (                                           // old
+        (timer->CC[1].reg < (timer->PER.reg - SIN_MARGIN)) &&
+        (timer->CC[1].reg > SIN_MARGIN)
+        )
+        + (timer->CC[1].reg <= SIN_MARGIN)                      // Increment
+        - (timer->CC[1].reg >= timer->PER.reg - SIN_MARGIN)     // Decrement
+        ;
+//*/
 }
 
 void configure_ports(void){
@@ -104,7 +117,8 @@ void enable_tc(void)
         | (0x1 << 2u)       // Start in 8-bit mode
         | (0x2 << 5u)       // Select the Normal PWM waveform
         ;
-    timer->PER.reg = 112;
+    timer->PER.reg = 62;
+//    timer->PER.reg = 107;    // for if statement
 
     while(timer->STATUS.reg & (1 << 7u));    // Synchronize before proceeding
 
