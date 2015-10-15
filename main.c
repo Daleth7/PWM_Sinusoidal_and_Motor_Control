@@ -17,12 +17,16 @@
     /**********   End type aliasing   **********/
 
 void Simple_Clk_Init(void);
+void enable_motor_port(void);
 void enable_sin_ports(void);
 void enable_sin_tc_clocks(void);
+void enable_motor_clocks(void);
 void enable_sin_tc8(void);
 void enable_sin_tc16(void);
+void enable_motor_pwm(void);
 void disable_sin_tc8(void);
 void disable_sin_tc16(void);
+void disable_motor_pwm(void);
     // Set up points to the appropriate structures
 void configure_ports(void);
 
@@ -42,14 +46,24 @@ void check_key(UINT8* row_dest, UINT8* col_dest);
     // Debounce key presses for validation.
 UINT8 debounce_keypress(void);
 
+void run_pwm_sin8(void);
+void run_pwm_sin16(void);
 
-Tc* timer_set;
+
+Tc* timer_set, *mot_timer_set;
     // Need to be careful since all TcCount instances are part of a union
 TcCount8* sin_timer8;
+TcCount8* mot_timer;
 TcCount16* sin_timer16;
 Port* port;
 PortGroup* bankA, *bankB;
-BOOLEAN__ on8 = TRUE__;
+
+#define MODE uint8_t
+#define SIN8_MODE   0
+#define SIN16_MODE  1
+#define MOT_MODE    2
+
+MODE mode = SIN8_MODE;
 
     // Samples for the 16-bit counter
 #define SIN_POP 100
@@ -66,8 +80,10 @@ UINT16 sin_samps[SIN_POP] = {
 	1851,  1887,  1920,  1949,  1975,  1996,  2014,  2028,  2038,  2044
 	};
 
-#define TIMER_PIN 13
 #define SIN_MARGIN 10
+#define TIMER_PIN 13
+#define MOTOR_U_PIN 23
+#define MOTOR_V_PIN 22
 
 int main (void)
 {
@@ -82,34 +98,67 @@ int main (void)
         // Keypad variables
     const UINT8 key_trig = SIN_MARGIN+1;
     UINT8 row, col;
+    const UINT8 safe_counter_lim = 100;
+    UINT8 safe_counter = 0;
+    UINT32 stop_duty = mot_timer->PER.reg / 2;
 
     while(1)
     {   // In a future implementation, write ISRs
-        if(on8 && sin_timer8->INTFLAG.reg & 0x1){
+        if(mode == SIN8_MODE && sin_timer8->INTFLAG.reg & 0x1){
             update_sin_counter();
             sin_timer8->INTFLAG.reg |= 0x1;
-        } else if(!on8 && sin_timer16->INTFLAG.reg & 0x1){
+        } else if(mode == SIN16_MODE && sin_timer16->INTFLAG.reg & 0x1){
             update_sin_counter();
             sin_timer16->INTFLAG.reg |= 0x1;
         } else if (
-            sin_timer8->COUNT.reg == key_trig ||
-            sin_timer16->COUNT.reg == key_trig
+            sin_timer8->COUNT.reg == key_trig  ||
+            sin_timer16->COUNT.reg == key_trig ||
+            mot_timer->COUNT.reg == mot_timer->CC[0].reg
         ){
             check_key(&row, &col);
+                // Switch modes
             if(
-                (row == 0 && col == 0xD && on8) ||
-                (row == 0 && col == 0xB && !on8)
+                (row == 0 && col == 0xD && mode == SIN8_MODE) ||
+                (row == 0 && col == 0xB && mode == SIN16_MODE)
             ){
                 switch_sin_counter();
+            } else if(row == 3 && col == 0xD && mode != MOT_MODE) {
+                enable_motor_pwm();
+            } else if(row == 3 && col == 0xB && mode == MOT_MODE){
+                safe_counter = 1;
             }
         }
+        if(mode == MOT_MODE){
+            if(safe_counter > 0){
+                ++safe_counter;
+                row = 0; 
+                if(stop_duty > mot_timer->CC[0].reg)    col = 0x8;
+                else                                    col = 0x2;
+            } else if(safe_counter >= safe_counter_lim){
+                enable_sin_tc8();
+                safe_counter = 0;
+                continue;
+            }
+                // Change speed
+            if(row == 0){
+                if(col == 0x2 && mot_timer->CC[0].reg != mot_timer->PER.reg - SIN_MARGIN){
+                    ++mot_timer->CC[0].reg;
+                    ++mot_timer->CC[1].reg;
+                }else if(col == 0x8 && mot_timer->CC[0].reg != SIN_MARGIN){
+                    --mot_timer->CC[0].reg;
+                    --mot_timer->CC[1].reg;
+                }
+            }
+        }
+        row = 4;
+        col = 4;
     }
 }
 
 void update_sin_counter(void){
     static int8_t count = 1, counter16 = 0, count2 = 1;
 
-    if(on8){
+    if(mode == SIN8_MODE){
         sin_timer8->CC[1].reg += count;
             // Change count to either 1 or -1 or keep the same
             //  depending on whether or not a limit was reached.
@@ -141,6 +190,8 @@ void update_sin_counter(void){
 void configure_ports(void){
     timer_set = (Tc*)(TC2);
     sin_timer8 = (TcCount8*)(&timer_set->COUNT8);
+    mot_timer_set = (Tc*)(TC4);
+    mot_timer = (TcCount8*)(&mot_timer_set->COUNT8);
     sin_timer16 = (TcCount16*)(&timer_set->COUNT16);
     port = (Port*)(PORT);
     bankA = (PortGroup*)(&port->Group[0]);
@@ -171,6 +222,17 @@ void enable_sin_ports(void)
     bankA->PMUX[(TIMER_PIN-1)/2].reg |= 0x4 << 4u;    // Select function E (sin_timer8)
 }
 
+/* Set correct PA pins as TC pins for PWM operation */
+void enable_motor_port(void)
+{
+        // Set up timer pin to use the timer
+    bankA->PINCFG[MOTOR_U_PIN].reg |= 0x1;            // Enable multiplexing
+    bankA->PINCFG[MOTOR_V_PIN].reg |= 0x1;            // Enable multiplexing
+
+    bankA->PMUX[(MOTOR_U_PIN-1)/2].reg |= 0x5 << 4u;    // Select function F (timer)
+    bankA->PMUX[MOTOR_V_PIN/2].reg |= 0x5;    // Select function F (timer)
+}
+
 /* Perform Clock configuration to source the TC 
 1) ENABLE THE APBC CLOCK FOR THE CORREECT MODULE
 2) WRITE THE PROPER GENERIC CLOCK SELETION ID*/
@@ -179,6 +241,16 @@ void enable_sin_tc_clocks(void)
     PM->APBCMASK.reg |= (1 << 10u);  // PM_APBCMASK is in the 10 position
     
     uint32_t temp=0x14;   // ID for TC2 is 0x14  (see table 14-2)
+    temp |= 0<<8;         //  Selection Generic clock generator 0
+    GCLK->CLKCTRL.reg=temp;   //  Setup in the CLKCTRL register
+    GCLK->CLKCTRL.reg |= 0x1u << 14;    // enable it.
+}
+
+void enable_motor_clocks(void)
+{
+    PM->APBCMASK.reg |= (1 << 12u);  // PM_APBCMASK is in the 12 position
+    
+    uint32_t temp=0x15;   // ID for TC4 is 0x15  (see table 14-2)
     temp |= 0<<8;         //  Selection Generic clock generator 0
     GCLK->CLKCTRL.reg=temp;   //  Setup in the CLKCTRL register
     GCLK->CLKCTRL.reg |= 0x1u << 14;    // enable it.
@@ -197,7 +269,7 @@ void enable_sin_tc_clocks(void)
 // Set presynchronizer to prescaled clock
 // Prescale clock by 1
 // Start in 16-bit mode
-// Select the Normal PWM waveform
+// Select the Match PWM waveform
 #define TC16_SETTINGS (     \
         (0x1 << 12u)        \
         | (0x0 << 8u)       \
@@ -214,18 +286,19 @@ void enable_sin_tc8(void)
         // To mess with registers, disable sin_timer8 first
     disable_sin_tc8();
     disable_sin_tc16();
+    disable_motor_pwm();
 
     bankB->OUT.reg &= ~0x00000200;
 
-    sin_timer16->CTRLA.reg &= ~TC16_SETTINGS;
     sin_timer8->CTRLA.reg |= TC8_SETTINGS;
-    sin_timer8->PER.reg = 48;
+    sin_timer8->PER.reg = 49;
 //    sin_timer8->PER.reg = 107;    // for if statement
     sin_timer8->CC[1].reg = 40;
 
     while(sin_timer8->STATUS.reg & (1 << 7u));    // Synchronize before proceeding
 
     sin_timer8->CTRLA.reg |= 1 << 1u;    // Re-enable the sin_timer8
+    mode = SIN8_MODE;
 }
 
 /* Configure the basic sin_timer8/counter to have a period of________ or a frequency of _________  */
@@ -239,34 +312,65 @@ void enable_sin_tc16(void)
         // To mess with registers, disable timer first
     disable_sin_tc8();
     disable_sin_tc16();
+    disable_motor_pwm();
 
-    while(sin_timer16->STATUS.reg & (1 << 7u));    // Synchronize before proceeding
-
-    sin_timer8->CTRLA.reg &= ~TC8_SETTINGS;
     sin_timer16->CTRLA.reg |= TC16_SETTINGS;
     sin_timer16->CC[1].reg = 40;
 
     while(sin_timer16->STATUS.reg & (1 << 7u));    // Synchronize before proceeding
 
     sin_timer16->CTRLA.reg |= 1 << 1u;    // Re-enable the timer
+    mode = SIN16_MODE;
+}
+
+void enable_motor_pwm(void)
+{
+    enable_motor_port();
+    enable_motor_clocks();
+
+        // To mess with registers, disable timer first
+    disable_sin_tc8();
+    disable_sin_tc16();
+    disable_motor_pwm();
+
+    mot_timer->CTRLA.reg |= TC8_SETTINGS;
+    mot_timer->PER.reg = 200;
+    mot_timer->CC[0].reg = mot_timer->CC[1].reg = 100;  // Start with 50% duty cycle
+
+    while(mot_timer->STATUS.reg & (1 << 7u));    // Synchronize before proceeding
+
+        // Invert the waveform from one of the outputs
+    mot_timer->CTRLC.reg |= 0x1;
+    mot_timer->CTRLA.reg |= 1 << 1u;    // Re-enable the timer
+    mode = MOT_MODE;
 }
 
 void disable_sin_tc8(void)
 {
     sin_timer8->CTRLA.reg &= ~(1 << 1u);
     while(sin_timer8->STATUS.reg & (1 << 7u));    // Synchronize before proceeding
+    sin_timer8->CTRLA.reg &= ~TC8_SETTINGS;
 }
 
 void disable_sin_tc16(void)
 {
     sin_timer16->CTRLA.reg &= ~(1 << 1u);
     while(sin_timer16->STATUS.reg & (1 << 7u));    // Synchronize before proceeding
+    sin_timer16->CTRLA.reg &= ~TC16_SETTINGS;
+}
+
+void disable_motor_pwm(void)
+{
+    mot_timer->CTRLA.reg &= ~(1 << 1u);
+    while(mot_timer->STATUS.reg & (1 << 7u));    // Synchronize before proceeding
+        // Revert the waveform from one of the outputs
+    mot_timer->CTRLC.reg &= ~0x1;
+    mot_timer->CTRLA.reg &= ~TC8_SETTINGS;
 }
 
 void switch_sin_counter(void){
-    if(on8) enable_sin_tc16();
-    else    enable_sin_tc8();
-    on8 = !on8;
+    if(mode == SIN8_MODE)   enable_sin_tc16();
+    else                    enable_sin_tc8();
 }
 
 UINT32 find_lsob(UINT32 target){
