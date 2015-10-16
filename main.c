@@ -1,22 +1,9 @@
 #include <asf.h>
 
-    /**********   Start type aliasing   **********/
-#include <stdint.h>
+#include "system_clock.h"
+#include "global_ports.h"
+#include "keypad.h"
 
-#define INT32   int32_t
-#define UINT32  uint32_t
-#define UINT16  uint16_t
-#define UINT8   uint8_t
-
-#define BOOLEAN__     UINT8
-#define TRUE__        1
-#define FALSE__       0
-
-    // Short macro functions for inlining common expressions
-#define IS_NULL(P) (P == NULL)
-    /**********   End type aliasing   **********/
-
-void Simple_Clk_Init(void);
 void enable_motor_port(void);
 void enable_sin_ports(void);
 void enable_sin_tc_clocks(void);
@@ -33,30 +20,14 @@ void configure_ports(void);
 void update_sin_counter(void);
 void switch_sin_counter(void);
 
-    // Find least significant ON bit
-UINT32 find_lsob(UINT32);
-
-    // Check for any input (key press) and provide debouncing functionality.
-    //  0 - 15 denotes key on keypad from right to left then bottom to top
-    //  TERMINATION_KEY2 denotes combo key to terminate program
-    //  TERMINATION_KEY denotes combo key to terminate test program
-    //    8 denotes the delete key
-    //    12 denotes the enter key
-void check_key(UINT8* row_dest, UINT8* col_dest);
-    // Debounce key presses for validation.
-UINT8 debounce_keypress(void);
-
 void run_pwm_sin8(void);
 void run_pwm_sin16(void);
 
 
-Tc* timer_set, *mot_timer_set;
     // Need to be careful since all TcCount instances are part of a union
 TcCount8* sin_timer8;
 TcCount8* mot_timer;
 TcCount16* sin_timer16;
-Port* port;
-PortGroup* bankA, *bankB;
 
 #define MODE uint8_t
 #define SIN8_MODE   0
@@ -90,6 +61,7 @@ int main (void)
     Simple_Clk_Init();
 
     /* Enable the sin_timer8*/
+    configure_global_ports();
     configure_ports();
     enable_sin_tc8();
 
@@ -98,9 +70,8 @@ int main (void)
         // Keypad variables
     const UINT8 key_trig = SIN_MARGIN+1;
     UINT8 row, col;
-    const UINT8 safe_counter_lim = 100;
-    UINT8 safe_counter = 0;
-    UINT32 stop_duty = mot_timer->PER.reg / 2;
+    UINT32 stop_duty = mot_timer->PER.reg/2;
+    BOOLEAN__ safe_stop = FALSE__;
 
     while(1)
     {   // In a future implementation, write ISRs
@@ -125,20 +96,24 @@ int main (void)
             } else if(row == 3 && col == 0xD && mode != MOT_MODE) {
                 enable_motor_pwm();
             } else if(row == 3 && col == 0xB && mode == MOT_MODE){
-                safe_counter = 1;
+                enable_sin_tc8();
+                continue;
+//                safe_stop = TRUE__;
             }
         }
         if(mode == MOT_MODE){
-            if(safe_counter > 0){
-                ++safe_counter;
+/*
+            if(safe_stop){
                 row = 0; 
-                if(stop_duty > mot_timer->CC[0].reg)    col = 0x8;
-                else                                    col = 0x2;
-            } else if(safe_counter >= safe_counter_lim){
-                enable_sin_tc8();
-                safe_counter = 0;
-                continue;
+                if(stop_duty > mot_timer->CC[0].reg)        col = 0x8;
+                else if(stop_duty < mot_timer->CC[0].reg)   col = 0x2;
+                else{
+                    safe_stop = FALSE__;
+                    enable_sin_tc8();
+                    continue;
+                }
             }
+*/
                 // Change speed
             if(row == 0){
                 if(col == 0x2 && mot_timer->CC[0].reg != mot_timer->PER.reg - SIN_MARGIN){
@@ -188,14 +163,9 @@ void update_sin_counter(void){
 }
 
 void configure_ports(void){
-    timer_set = (Tc*)(TC2);
-    sin_timer8 = (TcCount8*)(&timer_set->COUNT8);
-    mot_timer_set = (Tc*)(TC4);
-    mot_timer = (TcCount8*)(&mot_timer_set->COUNT8);
-    sin_timer16 = (TcCount16*)(&timer_set->COUNT16);
-    port = (Port*)(PORT);
-    bankA = (PortGroup*)(&port->Group[0]);
-    bankB = (PortGroup*)(&port->Group[1]);
+    sin_timer8 = timer2_8;
+    mot_timer = timer4_8;
+    sin_timer16 = timer2_16;
     bankB->DIR.reg |= 0x00000200; // Controls sign LED
         // Controls power to the keypad and SSDs. 0000 1111 0000
     bankA->DIR.reg |= 0x000000F0;
@@ -371,121 +341,4 @@ void disable_motor_pwm(void)
 void switch_sin_counter(void){
     if(mode == SIN8_MODE)   enable_sin_tc16();
     else                    enable_sin_tc8();
-}
-
-UINT32 find_lsob(UINT32 target){
-    UINT32 toreturn = 0u;
-    while(!(target & 0x1)){
-        ++toreturn;
-        target >>= 1;
-    }
-    return toreturn;
-}
-
-void check_key(UINT8* row_dest, UINT8* col_dest){
-    if(IS_NULL(row_dest) || IS_NULL(col_dest))  return;
-    static UINT8 cur_row = 0u;
-    // Provide power to one specific row
-    bankA->OUT.reg |= 0x000000F0;
-    bankA->OUT.reg &= ~(1u << (4u + cur_row));
-        // Extract the four bits we're interested in from
-        //   the keypad.
-    *col_dest = debounce_keypress();
-    *row_dest = cur_row;
-
-        // Prepare for the next row. If we were on the last
-        //  row, cycle back to the first row.
-        // Take modulous to retrieve current value of cur_row when
-        //  we were not on the last row. If that is the case,
-        //  reset row_bit to 0.
-    cur_row = (cur_row+1u)%4u;
-}
-
-
-UINT8 debounce_keypress(void){
-    // Triggered the instant the first key press is detected
-    //  Returns the resulting hex number
-
-    UINT8 toreturn = (bankA->IN.reg >> 16u) & 0xF;
-
-        // Check if more than one button in a row was pressed.
-        //  If so, checking for glitches is no longer important.
-    UINT32 counter = 0x0;
-    BOOLEAN__ already_on = FALSE__;
-    for(; counter < 4; ++counter){
-        if(already_on & (toreturn >> counter))  return toreturn;
-        else    already_on = (toreturn >> counter) & 0x1;
-    }
-
-    if(!toreturn)   return 0x0;
-#define MAX_JITTER  5
-#define MAX_JITTER2 1000
-#define RELEASE_LIM 7500
-
-    // First, read up to MAX_JITTER times to swallow spikes as button is
-    //  pressed. If no key press was detected in this time, the noise is
-    //  not from a button press.
-    for(counter = 0x0; counter < MAX_JITTER; ++counter){
-        if(!((bankA->IN.reg >> 16u) & 0xF))    return 0x0;
-    }
-
-    // Now swallow the spikes as the button is released. Do not exit
-    //  until the spikes are no longer detected after MAX_JITTER reads.
-    //  If the user is holding down the button, release manually based
-    //  on RELEASE_LIM.
-    volatile UINT32 release = 0x0;
-    for(
-        counter = 0x0;
-        counter < MAX_JITTER2 && release < RELEASE_LIM;
-        ++counter, ++release
-    ){
-        if((bankA->IN.reg >> 16u) & 0xF)    counter = 0x0;
-    }
-
-    return toreturn;
-
-#undef MAX_JITTER
-#undef RELEASE_LIM
-}
-
-//Simple Clock Initialization
-void Simple_Clk_Init(void)
-{
-    /* Various bits in the INTFLAG register can be set to one at startup.
-       This will ensure that these bits are cleared */
-    
-    SYSCTRL->INTFLAG.reg = SYSCTRL_INTFLAG_BOD33RDY | SYSCTRL_INTFLAG_BOD33DET |
-            SYSCTRL_INTFLAG_DFLLRDY;
-            
-    system_flash_set_waitstates(0);  //Clock_flash wait state =0
-
-    SYSCTRL_OSC8M_Type temp = SYSCTRL->OSC8M;      /* for OSC8M initialization  */
-
-    temp.bit.PRESC    = 0;    // no divide, i.e., set clock=8Mhz  (see page 170)
-    temp.bit.ONDEMAND = 1;    //  On-demand is true
-    temp.bit.RUNSTDBY = 0;    //  Standby is false
-    
-    SYSCTRL->OSC8M = temp;
-
-    SYSCTRL->OSC8M.reg |= 0x1u << 1;  //SYSCTRL_OSC8M_ENABLE bit = bit-1 (page 170)
-    
-    PM->CPUSEL.reg = (uint32_t)0;    // CPU and BUS clocks Divide by 1  (see page 110)
-    PM->APBASEL.reg = (uint32_t)0;     // APBA clock 0= Divide by 1  (see page 110)
-    PM->APBBSEL.reg = (uint32_t)0;     // APBB clock 0= Divide by 1  (see page 110)
-    PM->APBCSEL.reg = (uint32_t)0;     // APBB clock 0= Divide by 1  (see page 110)
-
-    PM->APBAMASK.reg |= 01u<<3;   // Enable Generic clock controller clock (page 127)
-
-    /* Software reset Generic clock to ensure it is re-initialized correctly */
-
-    GCLK->CTRL.reg = 0x1u << 0;   // Reset gen. clock (see page 94)
-    while (GCLK->CTRL.reg & 0x1u ) {  /* Wait for reset to complete */ }
-    
-    // Initialization and enable generic clock #0
-
-    *((uint8_t*)&GCLK->GENDIV.reg) = 0;  // Select GCLK0 (page 104, Table 14-10)
-
-    GCLK->GENDIV.reg  = 0x0100;            // Divide by 1 for GCLK #0 (page 104)
-
-    GCLK->GENCTRL.reg = 0x030600;           // GCLK#0 enable, Source=6(OSC8M), IDC=1 (page 101)
 }
