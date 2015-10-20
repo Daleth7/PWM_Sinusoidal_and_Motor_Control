@@ -4,6 +4,10 @@
 Port* port;
 PortGroup* bankA, *bankB;
 
+    // ADC and DAC
+Adc* adc;
+Dac* dac;
+
     // Timers
     // timerX refers to TcX while timerX_Y refers to TcX Y-bit counter
 Tc* timer2_set, *timer4_set;
@@ -18,6 +22,9 @@ void configure_global_ports(void){
     port = (Port*)(PORT);
     bankA = (PortGroup*)(&port->Group[0]);
     bankB = (PortGroup*)(&port->Group[1]);
+
+    adc = (Adc*)(ADC);
+    dac = (Dac*)(DAC);
 
     timer2_set = (Tc*)(TC2);
     timer2_8 = (TcCount8*)(&timer2_set->COUNT8);

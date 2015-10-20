@@ -21,25 +21,15 @@ void configure_keypad_ports(void){
     }
 }
 
-UINT32 find_lsob(UINT32 target){
-    UINT32 toreturn = 0u;
-    while(!(target & 0x1)){
-        ++toreturn;
-        target >>= 1;
-    }
-    return toreturn;
-}
-
 void check_key(UINT8* row_dest, UINT8* col_dest){
-    if(IS_NULL(row_dest) || IS_NULL(col_dest))  return;
     static UINT8 cur_row = 0u;
     // Provide power to one specific row
     key_bankA->OUT.reg |= 0x000000F0;
     key_bankA->OUT.reg &= ~(1u << (4u + cur_row));
         // Extract the four bits we're interested in from
         //   the keypad.
-    *col_dest = debounce_keypress();
-    *row_dest = cur_row;
+    if(!IS_NULL(col_dest))  *col_dest = debounce_keypress();
+    if(!IS_NULL(row_dest))  *row_dest = cur_row;
 
         // Prepare for the next row. If we were on the last
         //  row, cycle back to the first row.

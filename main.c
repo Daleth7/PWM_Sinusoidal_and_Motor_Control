@@ -3,6 +3,9 @@
 #include "system_clock.h"
 #include "global_ports.h"
 #include "keypad.h"
+#include "ssd.h"
+#include "adc_dac.h"
+#include "utilities.h"
 
 void enable_motor_port(void);
 void enable_sin_ports(void);
@@ -22,6 +25,7 @@ void switch_sin_counter(void);
 
 void run_pwm_sin8(void);
 void run_pwm_sin16(void);
+void run_pwm_mot(void);
 
 
     // Need to be careful since all TcCount instances are part of a union
@@ -34,7 +38,17 @@ TcCount16* sin_timer16;
 #define SIN16_MODE  1
 #define MOT_MODE    2
 
+#define SIN_MARGIN  10
+#define TIMER_PIN   13
+#define MOTOR_U_PIN 23
+#define MOTOR_V_PIN 22
+#define ADC_PIN     11
+#define AIN_PIN     0x13
+
 MODE mode = SIN8_MODE;
+    // Keypad variables
+const UINT8 key_trig = SIN_MARGIN+1;
+UINT8 row, col;
 
     // Samples for the 16-bit counter
 #define SIN_POP 100
@@ -51,72 +65,131 @@ UINT16 sin_samps[SIN_POP] = {
 	1851,  1887,  1920,  1949,  1975,  1996,  2014,  2028,  2038,  2044
 	};
 
-#define SIN_MARGIN 10
-#define TIMER_PIN 13
-#define MOTOR_U_PIN 23
-#define MOTOR_V_PIN 22
-
 int main (void)
 {
     Simple_Clk_Init();
+    delay_init();
 
     /* Enable the sin_timer8*/
     configure_global_ports();
+    configure_ssd_ports();
+    configure_keypad_ports();
+    configure_adc_default(AIN_PIN);
+    map_to_adc_odd(ADC_PIN);
     configure_ports();
-    enable_sin_tc8();
 
     sin_timer8->CC[1].reg = SIN_MARGIN + 1;
 
-        // Keypad variables
-    const UINT8 key_trig = SIN_MARGIN+1;
-    UINT8 row, col;
-    UINT32 stop_duty = mot_timer->PER.reg/2;
+    while(1)
+    {   // In a future implementation, write ISRs
+        switch(mode){
+            case SIN8_MODE:
+                run_pwm_sin8();
+                break;
+            case SIN16_MODE:
+                run_pwm_sin16();
+                break;
+            case MOT_MODE:
+                run_pwm_mot();
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void run_pwm_sin8(void){
+    enable_sin_tc8();
+    while(1){
+        if(sin_timer8->INTFLAG.reg & 0x1){
+            update_sin_counter();
+            sin_timer8->INTFLAG.reg |= 0x1;
+        } else if (sin_timer8->COUNT.reg == key_trig){
+            check_key(&row, &col);
+                // Switch modes
+            if(row == 0 && col == 0xD){
+                mode = SIN16_MODE;
+                return;
+            } else if(row == 3 && col == 0xD) {
+                mode = MOT_MODE;
+                return;
+            }
+        }
+        row = 4;
+        col = 16;
+    }
+}
+
+void run_pwm_sin16(void){
+    enable_sin_tc16();
+    while(1)
+    {   // In a future implementation, write ISRs
+        if(sin_timer16->INTFLAG.reg & 0x1){
+            update_sin_counter();
+            sin_timer16->INTFLAG.reg |= 0x1;
+        } else if (sin_timer16->COUNT.reg == key_trig){
+            check_key(&row, &col);
+                // Switch modes
+            if(row == 0 && col == 0xB){
+                mode = SIN8_MODE;
+                return;
+            } else if(row == 3 && col == 0xD) {
+                mode = MOT_MODE;
+                return;
+            }
+        }
+        row = 4;
+        col = 16;
+    }
+}
+
+void run_pwm_mot(void){
+    enable_motor_pwm();
+    const UINT32 period = mot_timer->PER.reg;
+    UINT8 col_conv;
+
+
+    UINT32 stop_duty = period/2;
     BOOLEAN__ safe_stop = FALSE__;
+
+    UINT32 pot_raw;
+    BOOLEAN__ key_ctrl = FALSE__;
+    UINT16 ten_place = 10;
 
     while(1)
     {   // In a future implementation, write ISRs
-        if(mode == SIN8_MODE && sin_timer8->INTFLAG.reg & 0x1){
-            update_sin_counter();
-            sin_timer8->INTFLAG.reg |= 0x1;
-        } else if(mode == SIN16_MODE && sin_timer16->INTFLAG.reg & 0x1){
-            update_sin_counter();
-            sin_timer16->INTFLAG.reg |= 0x1;
-        } else if (
-            sin_timer8->COUNT.reg == key_trig  ||
-            sin_timer16->COUNT.reg == key_trig ||
-            mot_timer->COUNT.reg == mot_timer->CC[0].reg
-        ){
-            check_key(&row, &col);
-                // Switch modes
-            if(
-                (row == 0 && col == 0xD && mode == SIN8_MODE) ||
-                (row == 0 && col == 0xB && mode == SIN16_MODE)
-            ){
-                switch_sin_counter();
-            } else if(row == 3 && col == 0xD && mode != MOT_MODE) {
-                enable_motor_pwm();
-            } else if(row == 3 && col == 0xB && mode == MOT_MODE){
-                enable_sin_tc8();
-                continue;
-//                safe_stop = TRUE__;
-            }
+        if(mot_timer->INTFLAG.reg &= 0x1){
+        check_key(&row, &col);
+            // Switch modes
+
+        if(row == 3 && col == 0xB){
+            safe_stop = TRUE__;
+        } else if(row == 2 && col == 0xD){
+            key_ctrl = FALSE__;
+        } else if(row == 2 && col == 0xB){
+            key_ctrl = TRUE__;
         }
-        if(mode == MOT_MODE){
-/*
-            if(safe_stop){
-                row = 0; 
-                if(stop_duty > mot_timer->CC[0].reg)        col = 0x8;
-                else if(stop_duty < mot_timer->CC[0].reg)   col = 0x2;
-                else{
-                    safe_stop = FALSE__;
-                    enable_sin_tc8();
-                    continue;
-                }
+
+
+        if(safe_stop){
+            if(stop_duty > mot_timer->CC[0].reg){
+                ++mot_timer->CC[0].reg;
+                ++mot_timer->CC[1].reg;
+            } else if(stop_duty < mot_timer->CC[0].reg){
+                --mot_timer->CC[0].reg;
+                --mot_timer->CC[1].reg;
+            } else{
+                mode = SIN8_MODE;
+                return;
             }
-*/
+            delay_ms(10);
+            continue;
+        }
+
                 // Change speed
+        if(key_ctrl == TRUE__){   // Use keypad
             if(row == 0){
-                if(col == 0x2 && mot_timer->CC[0].reg != mot_timer->PER.reg - SIN_MARGIN){
+                if(col == 0x2 && mot_timer->CC[0].reg != period - SIN_MARGIN){
                     ++mot_timer->CC[0].reg;
                     ++mot_timer->CC[1].reg;
                 }else if(col == 0x8 && mot_timer->CC[0].reg != SIN_MARGIN){
@@ -124,9 +197,31 @@ int main (void)
                     --mot_timer->CC[1].reg;
                 }
             }
+/*
+              // Allow user to enter an arbitrary duty cycle
+            else if(col != 0 && (col_conv = find_lsob(col)) > 1){
+                col_conv = (3-row)*3 + (3-col_conv);
+                if(mot_timer->CC[0].reg < 20){
+                    mot_timer->CC[0].reg = mot_timer->CC[0].reg * 10 + col_conv;
+                    mot_timer->CC[1].reg = mot_timer->CC[0].reg;
+                }
+            }
+*/
+        } else if(key_ctrl == FALSE__){    // Use potentiometer
+            pot_raw = read_adc();
+            mot_timer->CC[0].reg = pot_raw*(period - SIN_MARGIN - SIN_MARGIN)/0xFFFF + SIN_MARGIN;
+            mot_timer->CC[1].reg = mot_timer->CC[0].reg;
         }
-        row = 4;
-        col = 4;
+
+            // Display the current duty cycle
+        ten_place *= 10;
+        if(ten_place > 10000)  ten_place = 10;
+        display_dig(
+            0,
+            (((mot_timer->CC[0].reg*100)/period)%ten_place)*10/ten_place,
+            row, FALSE__, FALSE__
+            );
+        }
     }
 }
 
@@ -195,6 +290,11 @@ void enable_sin_ports(void)
 /* Set correct PA pins as TC pins for PWM operation */
 void enable_motor_port(void)
 {
+        // timer pin and adc output pins are shared, so change its settings
+    bankA->PINCFG[TIMER_PIN].reg &= ~0x1;            // Disable multiplexing
+    bankA->DIR.reg |= (1 << TIMER_PIN);
+    bankA->OUT.reg |= (1 << TIMER_PIN);            // Set high
+
         // Set up timer pin to use the timer
     bankA->PINCFG[MOTOR_U_PIN].reg |= 0x1;            // Enable multiplexing
     bankA->PINCFG[MOTOR_V_PIN].reg |= 0x1;            // Enable multiplexing
@@ -247,7 +347,6 @@ void enable_motor_clocks(void)
         | (0x3 << 5u)       \
     )
 
-/* Configure the basic sin_timer8/counter to have a period of________ or a frequency of _________  */
 void enable_sin_tc8(void)
 {
     enable_sin_ports();
@@ -271,7 +370,6 @@ void enable_sin_tc8(void)
     mode = SIN8_MODE;
 }
 
-/* Configure the basic sin_timer8/counter to have a period of________ or a frequency of _________  */
 void enable_sin_tc16(void)
 {
     enable_sin_ports();

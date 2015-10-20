@@ -9,6 +9,10 @@
 extern Port* port;
 extern PortGroup* bankA, *bankB;
 
+    // ADC and DAC
+extern Adc* adc;
+extern Dac* dac;
+
     // Timers
     // timerX refers to TcX while timerX_Y refers to TcX Y-bit counter
 extern Tc* timer2_set, *timer4_set;

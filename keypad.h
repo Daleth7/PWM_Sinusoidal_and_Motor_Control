@@ -4,7 +4,6 @@
 #include "extended_types.h"
 
 void configure_keypad_ports(void);
-UINT32 find_lsob(UINT32 target);
 void check_key(UINT8* row_dest, UINT8* col_dest);
 UINT8 debounce_keypress(void);
 

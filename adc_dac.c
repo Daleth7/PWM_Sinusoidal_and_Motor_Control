@@ -1,22 +1,25 @@
 #include "adc_dac.h"
 
+#include "global_ports.h"
+
 #ifndef NO_ADC__
 
 static Adc* adc_ptr;
+static PortGroup* bankA_ptr;
 
 void map_to_adc_odd(UINT8 port_pin){
         // Choose function B, which is analog input
         //  Shift by 4 to enter into the odd register
-    porta->PMUX[(port_pin - 1)/2].reg |= 0x1 << 4;
+    bankA_ptr->PMUX[(port_pin - 1)/2].reg |= 0x1 << 4;
         // Connect pin to multiplexer to allow analog input
-    porta->PINCFG[port_pin].reg |= 0x1;
+    bankA_ptr->PINCFG[port_pin].reg |= 0x1;
 }
 
 void map_to_adc_even(UINT8 port_pin){
         // Choose function B, which is analog input
-    porta->PMUX[port_pin/2].reg |= 0x1;
+    bankA_ptr->PMUX[port_pin/2].reg |= 0x1;
         // Connect pin to multiplexer to allow analog input
-    porta->PINCFG[port_pin].reg |= 0x1;
+    bankA_ptr->PINCFG[port_pin].reg |= 0x1;
 }
 
 void enable_adc_clk(void){
@@ -28,9 +31,8 @@ void enable_adc_clk(void){
     GCLK->CLKCTRL.reg |= 0x1u << 14;         // enable it.
 }
 
-void init_adc(UINT8 ain){
-    init_adc(
-        ain,    // Map the adc to analog pin ain
+void configure_adc_default(UINT8 ain){
+    configure_adc(
         0x2,    // Select a V_DD_AN/2 (1.65) reference
         0x8,    // Now collect 256 samples at a time.
                 //  Theoretical result has 20-bit precision.
@@ -46,16 +48,19 @@ void init_adc(UINT8 ain){
                 //  set gain to 1/2 to keep largest
                 // input voltage range (expected input
                 //  will be 0 - 3.3V)
-        0x18    // Not using the negative for differential, so ground it.
+        0x18,   // Not using the negative for differential, so ground it.
+        ain     // Map the adc to analog pin ain
         );
 }
 
-void init_adc(
+void configure_adc(
     UINT8 ref, UINT8 samp_rate, UINT8 samp_time, UINT8 presc,
     UINT8 ressel, UINT8 gain, UINT8 neg_ain, UINT8 ain
 ){
     configure_global_ports();
+    enable_adc_clk();
     adc_ptr = adc;
+    bankA_ptr = bankA;
 
     disable_adc();
 
@@ -97,7 +102,6 @@ unsigned int read_adc(void){
 
     UINT32 count = 0;
     for(count = 0; count < 350; ++count){
-        delay_us(1);
         adc_ptr->SWTRIG.reg |= 1 << 1u;
         while(!adc_ptr->INTFLAG.bit.RESRDY);    //wait for conversion to be available
     }
@@ -113,15 +117,15 @@ unsigned int read_adc(void){
 static Dac* dac_ptr;
 
 void map_to_dac_odd(UINT8 port_pin){
-	porta->PINCFG[port_pin].reg |= 0x1; // Enable multiplexing
+	bankA_ptr->PINCFG[port_pin].reg |= 0x1; // Enable multiplexing
         // Set to function B, which include DAC
         //  Shift by 4 for PUXO
-	porta->PMUX[(port_pin-1)/2].reg |= 0x1 << 4u;
+	bankA_ptr->PMUX[(port_pin-1)/2].reg |= 0x1 << 4u;
 }
 
 void map_to_dac_even(UINT8 port_pin){
-	porta->PINCFG[port_pin].reg |= 0x1; // Enable multiplexing
-	porta->PMUX[port_pin/2].reg |= 0x1; // Set to function B, which include DAC
+	bankA_ptr->PINCFG[port_pin].reg |= 0x1; // Enable multiplexing
+	bankA_ptr->PMUX[port_pin/2].reg |= 0x1; // Set to function B, which include DAC
 }
 
 void enable_dac_clk(void){
@@ -133,17 +137,17 @@ void enable_dac_clk(void){
     GCLK->CLKCTRL.reg |= 0x1u << 14;         // enable it.
 }
 
-void init_dac(void){
-    init_dac(0x1);
-
+void configure_dac_default(void){
+    configure_dac(0x1);
 
 	dac_ptr->CTRLB.reg |= 0x1;  // Enable DAC output to Vout
 
 	while (dac_ptr->STATUS.reg & DAC_STATUS_SYNCBUSY);
 }
 
-void init_dac(UINT8 ref){
+void configure_dac(UINT8 ref){
     configure_global_ports();
+    enable_dac_clk();
     dac_ptr = dac;
 
         // With each register change, wait for synchronization
