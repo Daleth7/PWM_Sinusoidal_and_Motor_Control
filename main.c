@@ -28,8 +28,9 @@ void run_pwm_sin16(void);
 void run_pwm_mot(void);
 
     // Have 8-bit register take a single step to target value with some delay in ms
-BOOLEAN__ step_toward8(UINT8 target, volatile UINT8* reg, UINT32 delay);
-void slow_motor_step(UINT32 target, UINT8 flag_check, UINT8* flag_src);
+    // Check is based on first register
+BOOLEAN__ step_toward8(UINT8 target, volatile UINT8* reg1, volatile UINT8* reg2, UINT32 delay);
+void slow_motor_step(UINT32 target);
 
     // Need to be careful since all TcCount instances are part of a union
 TcCount8* sin_timer8;
@@ -157,37 +158,30 @@ void run_pwm_mot(void){
         //      1 - safely start the motor before giving user control
         //      2 - Switch between control with the keypad and potentiometer
         //      3 - safely switch to pot control
-    UINT8 safe_set = 0x2;
+    BOOLEAN__ safe_set = FALSE__;
 
     UINT16 ten_place = 100;
 
         // Gradually start the motor before allowing control
-    slow_motor_step(map32(read_adc(), 0, 0xFFFF, SIN_MARGIN, period-SIN_MARGIN), 1, &safe_set);
+    slow_motor_step(map32(read_adc(), 0, 0xFFFF, SIN_MARGIN, period-SIN_MARGIN));
 
     while(1)
     {   // In a future implementation, write ISRs
         check_key(&row, &col);
             // Switch modes
         if(row == 3 && col == 0xB){ // Exit motor mmode
-            safe_set |= 0x1;
-        } else if(row == 2 && col == 0xD){  // Change to pot control
-            safe_set &= ~(1<<2u);
-            safe_set |= (1<<3u);
-        } else if(row == 2 && col == 0xB){  // Change to key control
-            safe_set |= (1<<2u);
-        }
-            // Gradually stop the motor before switching modes
-        while(safe_set & 0x1){
-            slow_motor_step(stop_duty, 0, &safe_set);
+            slow_motor_step(stop_duty);
             mode = SIN8_MODE;
             return;
+        } else if(row == 2 && col == 0xD){  // Change to pot control
+            safe_set = FALSE__;
+            slow_motor_step(map32(read_adc(), 0, 0xFFFF, SIN_MARGIN, period-SIN_MARGIN));
+        } else if(row == 2 && col == 0xB){  // Change to key control
+            safe_set = TRUE__;
         }
-            // Safely switch to pot control
-        if(safe_set & (1<<3u)){
-            slow_motor_step(map32(read_adc(), 0, 0xFFFF, SIN_MARGIN, period-SIN_MARGIN), 3, &safe_set);
-        }
+
                 // Change speed
-        if(safe_set & (1<<2u)){   // Use keypad
+        if(safe_set){   // Use keypad
             if(row == 0){
                 if(col == 0x2 && mot_timer->CC[0].reg != period - SIN_MARGIN){
                     ++mot_timer->CC[0].reg;
@@ -214,7 +208,6 @@ void run_pwm_mot(void){
         if(mot_timer->INTFLAG.reg &= 0x1){
             display_dig(
                 0,
-                //((safe_set & (1<<2u)) ? 10000 : 0),
                 (((mot_timer->CC[0].reg*100)/period)%ten_place)*10/ten_place,
                 row, FALSE__, FALSE__
                 );
@@ -440,18 +433,14 @@ void switch_sin_counter(void){
     else                    enable_sin_tc8();
 }
 
-BOOLEAN__ step_toward8(UINT8 target, volatile UINT8* reg, UINT32 delay){
-    if(target > *reg)       ++(*reg);
-    else if(target < *reg)  --(*reg);
+BOOLEAN__ step_toward8(UINT8 target, volatile UINT8* reg1, volatile UINT8* reg2, UINT32 delay){
+    if(target > *reg1)       ++(*reg1);
+    else if(target < *reg1)  --(*reg1);
+    *reg2 = *reg1;
     delay_ms(delay);
-    return target == *reg;
+    return target == *reg1;
 }
 
-void slow_motor_step(UINT32 target, UINT8 flag_check, UINT8* flag_src){
-    UINT8 flag_check_bit = 1 << flag_check;
-    while(*flag_src & flag_check_bit){
-        *flag_src &= ~flag_check_bit;
-        *flag_src |= !step_toward8(target, &mot_timer->CC[0].reg, 10) << flag_check;
-        mot_timer->CC[1].reg = mot_timer->CC[0].reg;
-    }
+void slow_motor_step(UINT32 target){
+    while(!step_toward8(target, &mot_timer->CC[0].reg, &mot_timer->CC[1].reg, 10));
 }
