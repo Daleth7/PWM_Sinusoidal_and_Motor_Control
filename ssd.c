@@ -34,8 +34,7 @@ void display_dig(
         // Active low logic
     bankB_ptr->OUT.reg |= 0x000000FF;
         // Provide power to one specific SSD
-    bankA_ptr->OUT.reg |= 0x000000F0;
-    bankA_ptr->OUT.reg &= ~(1 << (select + 4u));
+    bankA_ptr->OUT.reg |= 0x000000F0;   // Turn off first, then turn on later
     switch(num){
                 //  GEF DCBA
         case 0: // 0100 0000
@@ -95,5 +94,6 @@ void display_dig(
     else            bankB_ptr->OUT.reg |=  0x00000080;
     if(show_sign)   bankB_ptr->OUT.reg &= ~0x00000200;
     else            bankB_ptr->OUT.reg |=  0x00000200;
+    bankA_ptr->OUT.reg &= ~(1 << (select + 4u));    // Turn on specific display
     delay_us(add_delay);
 }

@@ -27,6 +27,9 @@ void run_pwm_sin8(void);
 void run_pwm_sin16(void);
 void run_pwm_mot(void);
 
+    // Have 8-bit register take a single step to target value with some delay in ms
+BOOLEAN__ step_toward8(UINT8 target, volatile UINT8* reg, UINT32 delay);
+void slow_motor_step(UINT32 target, UINT8 flag_check, UINT8* flag_src);
 
     // Need to be careful since all TcCount instances are part of a union
 TcCount8* sin_timer8;
@@ -146,48 +149,45 @@ void run_pwm_sin16(void){
 void run_pwm_mot(void){
     enable_motor_pwm();
     const UINT32 period = mot_timer->PER.reg;
-    UINT8 col_conv;
-
 
     UINT32 stop_duty = period/2;
-    BOOLEAN__ safe_stop = FALSE__;
+        // Stores bit flags detailing safety and control settings
+        //  Bits:
+        //      0 - safely stop the motor before switch modes
+        //      1 - safely start the motor before giving user control
+        //      2 - Switch between control with the keypad and potentiometer
+        //      3 - safely switch to pot control
+    UINT8 safe_set = 0x2;
 
-    UINT32 pot_raw;
-    BOOLEAN__ key_ctrl = FALSE__;
-    UINT16 ten_place = 10;
+    UINT16 ten_place = 100;
+
+        // Gradually start the motor before allowing control
+    slow_motor_step(map32(read_adc(), 0, 0xFFFF, SIN_MARGIN, period-SIN_MARGIN), 1, &safe_set);
 
     while(1)
     {   // In a future implementation, write ISRs
-        if(mot_timer->INTFLAG.reg &= 0x1){
         check_key(&row, &col);
             // Switch modes
-
-        if(row == 3 && col == 0xB){
-            safe_stop = TRUE__;
-        } else if(row == 2 && col == 0xD){
-            key_ctrl = FALSE__;
-        } else if(row == 2 && col == 0xB){
-            key_ctrl = TRUE__;
+        if(row == 3 && col == 0xB){ // Exit motor mmode
+            safe_set |= 0x1;
+        } else if(row == 2 && col == 0xD){  // Change to pot control
+            safe_set &= ~(1<<2u);
+            safe_set |= (1<<3u);
+        } else if(row == 2 && col == 0xB){  // Change to key control
+            safe_set |= (1<<2u);
         }
-
-
-        if(safe_stop){
-            if(stop_duty > mot_timer->CC[0].reg){
-                ++mot_timer->CC[0].reg;
-                ++mot_timer->CC[1].reg;
-            } else if(stop_duty < mot_timer->CC[0].reg){
-                --mot_timer->CC[0].reg;
-                --mot_timer->CC[1].reg;
-            } else{
-                mode = SIN8_MODE;
-                return;
-            }
-            delay_ms(10);
-            continue;
+            // Gradually stop the motor before switching modes
+        while(safe_set & 0x1){
+            slow_motor_step(stop_duty, 0, &safe_set);
+            mode = SIN8_MODE;
+            return;
         }
-
+            // Safely switch to pot control
+        if(safe_set & (1<<3u)){
+            slow_motor_step(map32(read_adc(), 0, 0xFFFF, SIN_MARGIN, period-SIN_MARGIN), 3, &safe_set);
+        }
                 // Change speed
-        if(key_ctrl == TRUE__){   // Use keypad
+        if(safe_set & (1<<2u)){   // Use keypad
             if(row == 0){
                 if(col == 0x2 && mot_timer->CC[0].reg != period - SIN_MARGIN){
                     ++mot_timer->CC[0].reg;
@@ -207,21 +207,21 @@ void run_pwm_mot(void){
                 }
             }
 */
-        } else if(key_ctrl == FALSE__){    // Use potentiometer
-            pot_raw = read_adc();
-            mot_timer->CC[0].reg = pot_raw*(period - SIN_MARGIN - SIN_MARGIN)/0xFFFF + SIN_MARGIN;
+        } else {    // Use potentiometer
+            mot_timer->CC[0].reg = map32(read_adc(), 0, 0xFFFF, SIN_MARGIN, period-SIN_MARGIN);
             mot_timer->CC[1].reg = mot_timer->CC[0].reg;
         }
-
+        if(mot_timer->INTFLAG.reg &= 0x1){
+            display_dig(
+                0,
+                //((safe_set & (1<<2u)) ? 10000 : 0),
+                (((mot_timer->CC[0].reg*100)/period)%ten_place)*10/ten_place,
+                row, FALSE__, FALSE__
+                );
+        }
             // Display the current duty cycle
         ten_place *= 10;
         if(ten_place > 10000)  ten_place = 10;
-        display_dig(
-            0,
-            (((mot_timer->CC[0].reg*100)/period)%ten_place)*10/ten_place,
-            row, FALSE__, FALSE__
-            );
-        }
     }
 }
 
@@ -407,8 +407,7 @@ void enable_motor_pwm(void)
 
     while(mot_timer->STATUS.reg & (1 << 7u));    // Synchronize before proceeding
 
-        // Invert the waveform from one of the outputs
-    mot_timer->CTRLC.reg |= 0x1;
+    mot_timer->CTRLC.reg |= 0x1;    // Invert the waveform from one of the outputs
     mot_timer->CTRLA.reg |= 1 << 1u;    // Re-enable the timer
     mode = MOT_MODE;
 }
@@ -439,4 +438,20 @@ void disable_motor_pwm(void)
 void switch_sin_counter(void){
     if(mode == SIN8_MODE)   enable_sin_tc16();
     else                    enable_sin_tc8();
+}
+
+BOOLEAN__ step_toward8(UINT8 target, volatile UINT8* reg, UINT32 delay){
+    if(target > *reg)       ++(*reg);
+    else if(target < *reg)  --(*reg);
+    delay_ms(delay);
+    return target == *reg;
+}
+
+void slow_motor_step(UINT32 target, UINT8 flag_check, UINT8* flag_src){
+    UINT8 flag_check_bit = 1 << flag_check;
+    while(*flag_src & flag_check_bit){
+        *flag_src &= ~flag_check_bit;
+        *flag_src |= !step_toward8(target, &mot_timer->CC[0].reg, 10) << flag_check;
+        mot_timer->CC[1].reg = mot_timer->CC[0].reg;
+    }
 }

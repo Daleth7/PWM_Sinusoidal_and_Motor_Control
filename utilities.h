@@ -3,6 +3,11 @@
 
 #include "extended_types.h"
 
-UINT32 find_lsob(UINT32 target);
+UINT32 find_lsob(UINT32 target);    // Find least significant ON bit
+UINT32 map32(
+    UINT32 orig,
+    UINT32 old_min, UINT32 old_max,
+    UINT32 new_min, UINT32 new_max
+    );
 
 #endif

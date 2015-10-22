@@ -8,3 +8,12 @@ UINT32 find_lsob(UINT32 target){
     }
     return toreturn;
 }
+
+UINT32 map32(
+    UINT32 orig,
+    UINT32 old_min, UINT32 old_max,
+    UINT32 new_min, UINT32 new_max
+    )
+{
+    return ((orig-old_min)*(new_max-new_min))/(old_max-new_min) + new_min;
+}
